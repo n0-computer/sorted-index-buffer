@@ -1,5 +1,5 @@
 [package]
-name = "custom-send-buf"
+name = "packet-buf"
 version = "0.1.0"
 edition = "2024"
 
