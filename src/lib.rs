@@ -104,6 +104,13 @@ impl<T> PacketBuffer<T> {
     /// Retain only the elements in the given index range.
     pub fn retain_range<R: std::ops::RangeBounds<u64>>(&mut self, range: R) {
         let (min1, max1) = self.clip_bounds(range);
+        if min1 >= max1 {
+            self.data.clear();
+            self.min = 0;
+            self.max = 0;
+            self.check_invariants();
+            return;
+        }
         let base = base(self.min, self.max);
         for i in self.min..min1 {
             self.data[(i - base) as usize] = None;
@@ -408,6 +415,61 @@ mod tests {
         }
         assert!(reference.is_empty());
         assert!(pb.is_empty());
+    }
+
+    #[test]
+    fn test_range_iterators() {
+        let mut pb = PacketBuffer::default();
+        for i in 0..100 {
+            pb.insert(i, i * 10);
+        }
+
+        // Test keys_range
+        let keys: Vec<_> = pb.keys_range(10..20).collect();
+        assert_eq!(keys, (10..20).collect::<Vec<_>>());
+
+        // Test reverse
+        let keys_rev: Vec<_> = pb.keys_range(10..20).rev().collect();
+        assert_eq!(keys_rev, (10..20).rev().collect::<Vec<_>>());
+
+        // Test values_range
+        let values: Vec<_> = pb.values_range(10..20).cloned().collect();
+        assert_eq!(values, (10..20).map(|i| i * 10).collect::<Vec<_>>());
+
+        // Test iter_range
+        let pairs: Vec<_> = pb.iter_range(10..20).map(|(k, v)| (k, *v)).collect();
+        assert_eq!(pairs, (10..20).map(|i| (i, i * 10)).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_retain_range() {
+        let mut pb = PacketBuffer::default();
+        for i in 0..100 {
+            pb.insert(i, i * 10);
+        }
+
+        pb.retain_range(20..80);
+
+        assert_eq!(pb.keys().next(), Some(20));
+        assert_eq!(pb.keys().next_back(), Some(79));
+        assert_eq!(pb.keys().count(), 60);
+        for i in 20..80 {
+            assert_eq!(pb.get(i), Some(&(i * 10)));
+        }
+        pb.check_invariants_expensive();
+
+        // Retain with range outside current bounds -> empty
+        pb.retain_range(200..300);
+        assert!(pb.is_empty());
+        pb.check_invariants_expensive();
+
+        // Rebuild and retain with superset range -> no-op
+        for i in 10..20 {
+            pb.insert(i, i * 10);
+        }
+        pb.retain_range(0..100);
+        assert_eq!(pb.keys().count(), 10);
+        pb.check_invariants_expensive();
     }
 
     fn assert_same<I1, I2, T>(iter1: I1, iter2: I2)
