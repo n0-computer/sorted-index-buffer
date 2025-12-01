@@ -70,7 +70,7 @@ impl<T> PacketBuffer<T> {
     pub fn keys_range<R: std::ops::RangeBounds<u64>>(
         &self,
         range: R,
-    ) -> impl Iterator<Item = u64> + DoubleEndedIterator + '_ {
+    ) -> impl DoubleEndedIterator<Item = u64> + '_ {
         let (buf_start, buf_end, start) = self.resolve_range(range);
         self.data[buf_start..buf_end]
             .iter()
@@ -82,7 +82,7 @@ impl<T> PacketBuffer<T> {
     pub fn values_range<R: std::ops::RangeBounds<u64>>(
         &self,
         range: R,
-    ) -> impl Iterator<Item = &T> + DoubleEndedIterator + '_ {
+    ) -> impl DoubleEndedIterator<Item = &T> + '_ {
         let (buf_start, buf_end, _) = self.resolve_range(range);
         self.data[buf_start..buf_end]
             .iter()
@@ -93,7 +93,7 @@ impl<T> PacketBuffer<T> {
     pub fn iter_range<R: std::ops::RangeBounds<u64>>(
         &self,
         range: R,
-    ) -> impl Iterator<Item = (u64, &T)> + DoubleEndedIterator + '_ {
+    ) -> impl DoubleEndedIterator<Item = (u64, &T)> + '_ {
         let (buf_start, buf_end, start) = self.resolve_range(range);
         self.data[buf_start..buf_end]
             .iter()
@@ -116,19 +116,19 @@ impl<T> PacketBuffer<T> {
     }
 
     /// Iterate over all keys in the buffer in ascending order.
-    pub fn keys(&self) -> impl Iterator<Item = u64> + DoubleEndedIterator + '_ {
+    pub fn keys(&self) -> impl DoubleEndedIterator<Item = u64> + '_ {
         self.keys_range(..)
     }
 
     /// Iterate over all values in the buffer in ascending order of their keys.
-    pub fn values(&self) -> impl Iterator<Item = &T> + DoubleEndedIterator + '_ {
+    pub fn values(&self) -> impl DoubleEndedIterator<Item = &T> + '_ {
         self.values_range(..)
     }
 
     /// Iterate over all (index, value) pairs in the buffer in ascending order of their keys.
     ///
     /// Values are returned by reference.
-    pub fn iter(&self) -> impl Iterator<Item = (u64, &T)> + DoubleEndedIterator + '_ {
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = (u64, &T)> + '_ {
         self.iter_range(..)
     }
 
