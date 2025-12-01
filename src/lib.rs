@@ -22,10 +22,10 @@
 ///
 /// Access is O(1). Insertion and removal is usually O(1), but will occasionally
 /// move contents around to resize the buffer, which is O(n). Moving will only
-/// happem every O(n.next_power_of_two()) operations, so amortized complexity is
+/// happen every O(n.next_power_of_two()) operations, so amortized complexity is
 /// still O(1).
-#[derive(Debug)]
-pub struct PacketBuffer<T> {
+#[derive(Debug, Clone)]
+pub struct PacketBuf<T> {
     /// The underlying data buffer. Size is a power of two, 2 "pages".
     data: Vec<Option<T>>,
     /// The minimum valid index (inclusive).
@@ -34,13 +34,13 @@ pub struct PacketBuffer<T> {
     max: u64,
 }
 
-impl<T> Default for PacketBuffer<T> {
+impl<T> Default for PacketBuf<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T> PacketBuffer<T> {
+impl<T> PacketBuf<T> {
     /// Create a new PacketBuffer with the given initial capacity.
     pub fn with_capacity(capacity: usize) -> Self {
         let data = Vec::with_capacity(capacity);
@@ -89,6 +89,17 @@ impl<T> PacketBuffer<T> {
             .filter_map(|slot| slot.as_ref())
     }
 
+    /// Iterate over all values in the given index range in ascending order of their keys.
+    pub fn values_range_mut<R: std::ops::RangeBounds<u64>>(
+        &mut self,
+        range: R,
+    ) -> impl DoubleEndedIterator<Item = &mut T> + '_ {
+        let (buf_start, buf_end, _) = self.resolve_range(range);
+        self.data[buf_start..buf_end]
+            .iter_mut()
+            .filter_map(|slot| slot.as_mut())
+    }
+
     /// Iterate over all (index, value) pairs in the given index range in ascending order of their keys.
     pub fn iter_range<R: std::ops::RangeBounds<u64>>(
         &self,
@@ -132,6 +143,11 @@ impl<T> PacketBuffer<T> {
         self.values_range(..)
     }
 
+    /// Iterate over all values in the buffer in ascending order of their keys.
+    pub fn values_mut(&mut self) -> impl DoubleEndedIterator<Item = &mut T> + '_ {
+        self.values_range_mut(..)
+    }
+
     /// Iterate over all (index, value) pairs in the buffer in ascending order of their keys.
     ///
     /// Values are returned by reference.
@@ -139,8 +155,19 @@ impl<T> PacketBuffer<T> {
         self.iter_range(..)
     }
 
+    /// Turn into an iterator over all (index, value) pairs in the buffer in ascending order of their keys.
+    pub fn into_iter(self) -> impl DoubleEndedIterator<Item = (u64, T)> {
+        let base = base(self.min, self.max);
+        self.data
+            .into_iter()
+            .enumerate()
+            .filter_map(move |(i, slot)| slot.map(|v| (base + i as u64, v)))
+    }
+
     /// Convert range bounds into an inclusive start and exclusive end, clipped to the current
     /// bounds.
+    /// 
+    /// The resulting range may be empty, which has to be handled by the caller.
     #[inline]
     fn clip_bounds<R: std::ops::RangeBounds<u64>>(&self, range: R) -> (u64, u64) {
         use std::ops::Bound;
@@ -161,6 +188,9 @@ impl<T> PacketBuffer<T> {
     #[inline]
     fn resolve_range<R: std::ops::RangeBounds<u64>>(&self, range: R) -> (usize, usize, u64) {
         let (start, end) = self.clip_bounds(range);
+        if start >= end {
+            return (0, 0, start);
+        }
         let base = base(self.min, self.max);
         let buf_start = (start - base) as usize;
         let buf_end = (end - base) as usize;
@@ -393,7 +423,7 @@ mod tests {
     fn test_usage() {
         let elements = lag_permute(0..10000, 100).collect::<Vec<_>>();
         let mut reference = BTreeMap::<u64, u64>::new();
-        let mut pb = PacketBuffer::<u64>::default();
+        let mut pb = PacketBuf::<u64>::default();
         let d = 100;
         let add = elements
             .iter()
@@ -419,7 +449,7 @@ mod tests {
 
     #[test]
     fn test_range_iterators() {
-        let mut pb = PacketBuffer::default();
+        let mut pb = PacketBuf::default();
         for i in 0..100 {
             pb.insert(i, i * 10);
         }
@@ -443,7 +473,7 @@ mod tests {
 
     #[test]
     fn test_retain_range() {
-        let mut pb = PacketBuffer::default();
+        let mut pb = PacketBuf::default();
         for i in 0..100 {
             pb.insert(i, i * 10);
         }
