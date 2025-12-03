@@ -113,6 +113,9 @@ impl<T> PacketBuf<T> {
     }
 
     pub fn retain(&mut self, f: impl FnMut(u64, &mut T) -> bool) {
+        if self.is_empty() {
+            return;
+        }
         let mut f = f;
         let base = base(self.min, self.max);
         for i in self.min..self.max {
@@ -571,38 +574,38 @@ mod tests {
     }
 
     #[derive(Debug, Clone)]
-    enum Op {
+    enum InsertRemoveGetOp {
         Insert(u64, u64),
         Remove(u64),
         Get(u64),
     }
 
-    fn op_strategy() -> impl Strategy<Value = Op> {
+    fn op_strategy() -> impl Strategy<Value = InsertRemoveGetOp> {
         prop_oneof![
-            (0..1000u64, any::<u64>()).prop_map(|(k, v)| Op::Insert(k, v)),
-            (0..1000u64).prop_map(Op::Remove),
-            (0..1000u64).prop_map(Op::Get),
+            (0..1000u64, any::<u64>()).prop_map(|(k, v)| InsertRemoveGetOp::Insert(k, v)),
+            (0..1000u64).prop_map(InsertRemoveGetOp::Remove),
+            (0..1000u64).prop_map(InsertRemoveGetOp::Get),
         ]
     }
 
     proptest! {
         #[test]
-        fn test_matches_btreemap(ops in prop::collection::vec(op_strategy(), 0..1000)) {
+        fn test_insert_remove_get(ops in prop::collection::vec(op_strategy(), 0..1000)) {
             let mut pb = PacketBuf::default();
             let mut reference = BTreeMap::new();
 
             for op in ops {
                 match op {
-                    Op::Insert(k, v) => {
+                    InsertRemoveGetOp::Insert(k, v) => {
                         pb.insert(k, v);
                         reference.insert(k, v);
                     }
-                    Op::Remove(k) => {
+                    InsertRemoveGetOp::Remove(k) => {
                         let v1 = pb.remove(k);
                         let v2 = reference.remove(&k);
                         assert_eq!(v1, v2);
                     }
-                    Op::Get(k) => {
+                    InsertRemoveGetOp::Get(k) => {
                         let v1 = pb.get(k);
                         let v2 = reference.get(&k);
                         assert_eq!(v1, v2);
