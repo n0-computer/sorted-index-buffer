@@ -112,6 +112,36 @@ impl<T> PacketBuf<T> {
             .filter_map(move |(i, slot)| slot.as_ref().map(|v| (start + i as u64, v)))
     }
 
+    pub fn retain(&mut self, f: impl FnMut(u64, &mut T) -> bool) {
+        let mut f = f;
+        let base = base(self.min, self.max);
+        for i in self.min..self.max {
+            let offset = (i - base) as usize;
+            let Some(v) = &mut self.data[offset] else {
+                continue;
+            };
+            if !f(i, v) {
+                self.data[offset] = None;
+            }
+        }
+        // Now adjust min and max
+        let start = (self.min - base) as usize;
+        let end = (self.max - base) as usize;
+        let min1 = self.data[start..end]
+            .iter()
+            .position(|slot| slot.is_some())
+            .map(|p| p + start)
+            .unwrap_or(end) as u64 + base;
+        let max1 = self.data[start..end]
+            .iter()
+            .rev()
+            .position(|slot| slot.is_some())
+            .map(|p| end - p)
+            .unwrap_or(start + 1) as u64 + base;
+        self.resize(min1, max1);
+        self.check_invariants();
+    }
+
     /// Retain only the elements in the given index range.
     pub fn retain_range<R: std::ops::RangeBounds<u64>>(&mut self, range: R) {
         let (min1, max1) = self.clip_bounds(range);
@@ -281,7 +311,7 @@ impl<T> PacketBuf<T> {
             // nothing to do
             return;
         }
-        if min1 == max1 {
+        if min1 >= max1 {
             // resizing to empty buffer
             *self = Self::new();
             return;
@@ -471,6 +501,33 @@ mod tests {
         assert_eq!(pairs, (10..20).map(|i| (i, i * 10)).collect::<Vec<_>>());
     }
 
+
+    #[test]
+    fn test_retain() {
+        let mut pb = PacketBuf::default();
+        for i in 0..100 {
+            pb.insert(i, i * 10);
+        }
+
+        pb.retain(|i, _v| i % 2 == 0);
+
+        assert_eq!(pb.keys().next(), Some(0));
+        assert_eq!(pb.keys().next_back(), Some(98));
+        assert_eq!(pb.keys().count(), 50);
+        for i in 0..100 {
+            if i % 2 == 0 {
+                assert_eq!(pb.get(i), Some(&(i * 10)));
+            } else {
+                assert_eq!(pb.get(i), None);
+            }
+        }
+        pb.check_invariants_expensive();
+
+        pb.retain(|_,_| false);
+        assert!(pb.is_empty());
+        pb.check_invariants_expensive();
+    }
+
     #[test]
     fn test_retain_range() {
         let mut pb = PacketBuf::default();
@@ -531,7 +588,7 @@ mod tests {
     proptest! {
         #[test]
         fn test_matches_btreemap(ops in prop::collection::vec(op_strategy(), 0..1000)) {
-            let mut pb = PacketBuffer::default();
+            let mut pb = PacketBuf::default();
             let mut reference = BTreeMap::new();
 
             for op in ops {
