@@ -1,10 +1,10 @@
-/// A buffer for packets indexed by a u64 sequence number.
+/// A buffer indexed by a u64 sequence number.
 ///
 /// This behaves idential to a BTreeMap<u64, T>, but is optimized for the case where
 /// the indices are mostly contiguous, with occasional gaps.
 ///
 /// It will have large memory overhead if the indices are very sparse, so it
-/// should not be used as a general-purpose map.
+/// should not be used as a general-purpose sorted map.
 ///
 /// # Internals
 ///
@@ -25,7 +25,7 @@
 /// happen every O(n.next_power_of_two()) operations, so amortized complexity is
 /// still O(1).
 #[derive(Debug, Clone)]
-pub struct PacketBuf<T> {
+pub struct SortedIndexBuffer<T> {
     /// The underlying data buffer. Size is a power of two, 2 "pages".
     data: Vec<Option<T>>,
     /// The minimum valid index (inclusive).
@@ -34,14 +34,14 @@ pub struct PacketBuf<T> {
     max: u64,
 }
 
-impl<T> Default for PacketBuf<T> {
+impl<T> Default for SortedIndexBuffer<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T> PacketBuf<T> {
-    /// Create a new PacketBuffer with the given initial capacity.
+impl<T> SortedIndexBuffer<T> {
+    /// Create a new SortedIndexBuffer with the given initial capacity.
     pub fn with_capacity(capacity: usize) -> Self {
         let data = Vec::with_capacity(capacity);
         Self {
@@ -51,7 +51,7 @@ impl<T> PacketBuf<T> {
         }
     }
 
-    /// Create a new, empty PacketBuffer.
+    /// Create a new, empty SortedIndexBuffer.
     pub fn new() -> Self {
         Self::with_capacity(0)
     }
@@ -134,13 +134,15 @@ impl<T> PacketBuf<T> {
             .iter()
             .position(|slot| slot.is_some())
             .map(|p| p + start)
-            .unwrap_or(end) as u64 + base;
+            .unwrap_or(end) as u64
+            + base;
         let max1 = self.data[start..end]
             .iter()
             .rev()
             .position(|slot| slot.is_some())
             .map(|p| end - p)
-            .unwrap_or(start + 1) as u64 + base;
+            .unwrap_or(start + 1) as u64
+            + base;
         self.resize(min1, max1);
         self.check_invariants();
     }
@@ -199,7 +201,7 @@ impl<T> PacketBuf<T> {
 
     /// Convert range bounds into an inclusive start and exclusive end, clipped to the current
     /// bounds.
-    /// 
+    ///
     /// The resulting range may be empty, which has to be handled by the caller.
     #[inline]
     fn clip_bounds<R: std::ops::RangeBounds<u64>>(&self, range: R) -> (u64, u64) {
@@ -374,9 +376,11 @@ impl<T> PacketBuf<T> {
         &mut self.data
     }
 
-    /// Check that the invariants of the PacketBuffer hold.
+    /// Check that the invariants of the SortedIndexBuffer hold.
     ///
     /// This should be called after each public &mut method.
+    ///
+    /// It is a noop in release builds.
     fn check_invariants(&self) {
         if self.is_empty() {
             // for the empty buffer, min and max must be zero
@@ -390,6 +394,8 @@ impl<T> PacketBuf<T> {
     }
 
     /// Same as `check_invariants`, but also checks that the unused parts of the buffer are empty.
+    ///
+    /// This is more expensive, so only used in tests.
     #[cfg(test)]
     fn check_invariants_expensive(&self) {
         self.check_invariants();
@@ -456,7 +462,7 @@ mod tests {
     fn test_usage() {
         let elements = lag_permute(0..10000, 100).collect::<Vec<_>>();
         let mut reference = BTreeMap::<u64, u64>::new();
-        let mut pb = PacketBuf::<u64>::default();
+        let mut pb = SortedIndexBuffer::<u64>::default();
         let d = 100;
         let add = elements
             .iter()
@@ -482,7 +488,7 @@ mod tests {
 
     #[test]
     fn test_range_iterators() {
-        let mut pb = PacketBuf::default();
+        let mut pb = SortedIndexBuffer::default();
         for i in 0..100 {
             pb.insert(i, i * 10);
         }
@@ -504,10 +510,9 @@ mod tests {
         assert_eq!(pairs, (10..20).map(|i| (i, i * 10)).collect::<Vec<_>>());
     }
 
-
     #[test]
     fn test_retain() {
-        let mut pb = PacketBuf::default();
+        let mut pb = SortedIndexBuffer::default();
         for i in 0..100 {
             pb.insert(i, i * 10);
         }
@@ -526,14 +531,14 @@ mod tests {
         }
         pb.check_invariants_expensive();
 
-        pb.retain(|_,_| false);
+        pb.retain(|_, _| false);
         assert!(pb.is_empty());
         pb.check_invariants_expensive();
     }
 
     #[test]
     fn test_retain_range() {
-        let mut pb = PacketBuf::default();
+        let mut pb = SortedIndexBuffer::default();
         for i in 0..100 {
             pb.insert(i, i * 10);
         }
@@ -591,7 +596,7 @@ mod tests {
     proptest! {
         #[test]
         fn test_insert_remove_get(ops in prop::collection::vec(op_strategy(), 0..1000)) {
-            let mut pb = PacketBuf::default();
+            let mut pb = SortedIndexBuffer::default();
             let mut reference = BTreeMap::new();
 
             for op in ops {
