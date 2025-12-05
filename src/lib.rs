@@ -194,7 +194,7 @@ impl<T> SortedIndexBuffer<T> {
     }
 
     /// Turn into an iterator over all (index, value) pairs in the buffer in ascending order of their keys.
-    /// 
+    ///
     /// This is an explicit method instead of implementing IntoIterator, so we can return a
     /// DoubleEndedIterator without having to name the iterator type.
     #[allow(clippy::should_implement_trait)]

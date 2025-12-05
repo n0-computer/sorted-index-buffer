@@ -1,4 +1,3 @@
-
 use std::collections::BTreeMap;
 
 use proptest::prelude::*;
@@ -157,33 +156,33 @@ fn op_strategy() -> impl Strategy<Value = InsertRemoveGetOp> {
     ]
 }
 
-proptest! {
-    #[test]
-    fn test_insert_remove_get(ops in prop::collection::vec(op_strategy(), 0..1000)) {
-        let mut pb = SortedIndexBuffer::default();
-        let mut reference = BTreeMap::new();
+#[test_strategy::proptest]
+fn test_insert_remove_get(
+    #[strategy(prop::collection::vec(op_strategy(), 0..1000))] ops: Vec<InsertRemoveGetOp>,
+) {
+    let mut pb = SortedIndexBuffer::default();
+    let mut reference = BTreeMap::new();
 
-        for op in ops {
-            match op {
-                InsertRemoveGetOp::Insert(k, v) => {
-                    pb.insert(k, v);
-                    reference.insert(k, v);
-                }
-                InsertRemoveGetOp::Remove(k) => {
-                    let v1 = pb.remove(k);
-                    let v2 = reference.remove(&k);
-                    assert_eq!(v1, v2);
-                }
-                InsertRemoveGetOp::Get(k) => {
-                    let v1 = pb.get(k);
-                    let v2 = reference.get(&k);
-                    assert_eq!(v1, v2);
-                }
+    for op in ops {
+        match op {
+            InsertRemoveGetOp::Insert(k, v) => {
+                pb.insert(k, v);
+                reference.insert(k, v);
             }
-            pb.check_invariants_expensive();
+            InsertRemoveGetOp::Remove(k) => {
+                let v1 = pb.remove(k);
+                let v2 = reference.remove(&k);
+                assert_eq!(v1, v2);
+            }
+            InsertRemoveGetOp::Get(k) => {
+                let v1 = pb.get(k);
+                let v2 = reference.get(&k);
+                assert_eq!(v1, v2);
+            }
         }
-
-        // Final state should match
-        assert_same(pb.iter(), reference.iter().map(|(k, v)| (*k, v)));
+        pb.check_invariants_expensive();
     }
+
+    // Final state should match
+    assert_same(pb.iter(), reference.iter().map(|(k, v)| (*k, v)));
 }
