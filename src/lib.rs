@@ -251,13 +251,15 @@ impl<T> SortedIndexBuffer<T> {
 
     /// Insert value at index.
     pub fn insert(&mut self, index: u64, value: T) {
-        let (min1, max1) = if self.is_empty() {
-            (index, index + 1)
+        if self.is_empty() {
+            self.min = index;
+            self.max = index + 1;
+            self.data.push(Some(value));
         } else {
-            (self.min.min(index), self.max.max(index + 1))
-        };
-        self.resize(min1, max1);
-        self.insert0(index, value);
+            let (min1, max1) = (self.min.min(index), self.max.max(index + 1));
+            self.resize(min1, max1);
+            self.insert0(index, value);
+        }
         self.check_invariants();
     }
 
@@ -298,6 +300,7 @@ impl<T> SortedIndexBuffer<T> {
     /// Insert value at index, assuming the buffer already covers that index.
     ///
     /// The resulting buffer may violate the invariants.
+    #[inline(always)]
     fn insert0(&mut self, index: u64, value: T) {
         let base = base(self.min, self.max);
         let offset = (index - base) as usize;
@@ -307,6 +310,7 @@ impl<T> SortedIndexBuffer<T> {
     /// Remove value at index without resizing the buffer.
     ///
     /// The resulting buffer may violate the invariants.
+    #[inline(always)]
     fn remove0(&mut self, index: u64) -> Option<T> {
         if index < self.min || index >= self.max {
             return None;
@@ -318,6 +322,7 @@ impl<T> SortedIndexBuffer<T> {
 
     /// Resize the buffer to cover the range [`min1`, `max1`), while preserving existing
     /// elements.
+    #[inline(always)]
     fn resize(&mut self, min1: u64, max1: u64) {
         if min1 == self.min && max1 == self.max {
             // nothing to do
@@ -374,10 +379,12 @@ impl<T> SortedIndexBuffer<T> {
         self.max = max1;
     }
 
+    #[inline(always)]
     fn buf(&self) -> &[Option<T>] {
         &self.data
     }
 
+    #[inline(always)]
     fn buf_mut(&mut self) -> &mut [Option<T>] {
         &mut self.data
     }
