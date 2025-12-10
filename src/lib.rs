@@ -325,7 +325,9 @@ impl<T> SortedIndexBuffer<T> {
         }
         if min1 >= max1 {
             // resizing to empty buffer
-            *self = Self::new();
+            self.data.clear();
+            self.min = 0;
+            self.max = 0;
             return;
         }
         let len0 = self.buf().len();
@@ -345,14 +347,11 @@ impl<T> SortedIndexBuffer<T> {
                 self.buf_mut().rotate_left(shift);
             }
         } else if len0 < len1 {
+            for _ in len0..len1 {
+                self.data.push(None);
+            }
             // Grow
-            if len0 == 0 {
-                // buffer was empty before.
-                self.data = mk_empty(len1);
-            } else {
-                self.data
-                    .extend(std::iter::repeat_with(|| None).take(len1 - len0));
-
+            if len0 != 0 {
                 let start0 = (self.min - base0) as usize;
                 let start1 = (self.min - base1) as usize;
                 let count = (self.max - self.min) as usize;
@@ -418,22 +417,16 @@ impl<T> SortedIndexBuffer<T> {
     }
 }
 
-fn mk_empty<T>(n: usize) -> Vec<Option<T>> {
-    let mut res = Vec::with_capacity(n);
-    for _ in 0..n {
-        res.push(None);
-    }
-    res
-}
-
 /// Compute the minimum buffer length needed to cover [min, max) even in the
 /// case where min..max go over a page boundary.
+#[inline(always)]
 fn buf_len(min: u64, max: u64) -> usize {
     let page_size = (max - min).next_power_of_two() as usize;
     page_size * 2
 }
 
 /// Compute the base index for the buffer covering [min, max).
+#[inline(always)]
 fn base(min: u64, max: u64) -> u64 {
     let buf_len = buf_len(min, max);
     let mask = (buf_len as u64) / 2 - 1;
