@@ -8,7 +8,7 @@ license = "MIT OR Apache-2.0"
 authors = ["rklaehn <rklaehn@protonmail.com>", "n0 team"]
 repository = "https://github.com/n0-computer/iroh"
 keywords = ["map", "buffer"]
-categories = ["data-structures"]
+categories = ["data-structures", "no-std"]
 
 [dependencies]
 

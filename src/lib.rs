@@ -1,3 +1,9 @@
+#![cfg_attr(not(test), no_std)]
+
+extern crate alloc;
+
+use alloc::vec::Vec;
+
 #[cfg(test)]
 mod tests;
 
@@ -70,7 +76,7 @@ impl<T> SortedIndexBuffer<T> {
     }
 
     /// Iterate over all keys in the given index range in ascending order.
-    pub fn keys_range<R: std::ops::RangeBounds<u64>>(
+    pub fn keys_range<R: core::ops::RangeBounds<u64>>(
         &self,
         range: R,
     ) -> impl DoubleEndedIterator<Item = u64> + '_ {
@@ -82,7 +88,7 @@ impl<T> SortedIndexBuffer<T> {
     }
 
     /// Iterate over all values in the given index range in ascending order of their keys.
-    pub fn values_range<R: std::ops::RangeBounds<u64>>(
+    pub fn values_range<R: core::ops::RangeBounds<u64>>(
         &self,
         range: R,
     ) -> impl DoubleEndedIterator<Item = &T> + '_ {
@@ -93,7 +99,7 @@ impl<T> SortedIndexBuffer<T> {
     }
 
     /// Iterate over all values in the given index range in ascending order of their keys.
-    pub fn values_range_mut<R: std::ops::RangeBounds<u64>>(
+    pub fn values_range_mut<R: core::ops::RangeBounds<u64>>(
         &mut self,
         range: R,
     ) -> impl DoubleEndedIterator<Item = &mut T> + '_ {
@@ -104,7 +110,7 @@ impl<T> SortedIndexBuffer<T> {
     }
 
     /// Iterate over all (index, value) pairs in the given index range in ascending order of their keys.
-    pub fn iter_range<R: std::ops::RangeBounds<u64>>(
+    pub fn iter_range<R: core::ops::RangeBounds<u64>>(
         &self,
         range: R,
     ) -> impl DoubleEndedIterator<Item = (u64, &T)> + '_ {
@@ -151,7 +157,7 @@ impl<T> SortedIndexBuffer<T> {
     }
 
     /// Retain only the elements in the given index range.
-    pub fn retain_range<R: std::ops::RangeBounds<u64>>(&mut self, range: R) {
+    pub fn retain_range<R: core::ops::RangeBounds<u64>>(&mut self, range: R) {
         let (min1, max1) = self.clip_bounds(range);
         if min1 >= max1 {
             self.data.clear();
@@ -211,8 +217,8 @@ impl<T> SortedIndexBuffer<T> {
     ///
     /// The resulting range may be empty, which has to be handled by the caller.
     #[inline]
-    fn clip_bounds<R: std::ops::RangeBounds<u64>>(&self, range: R) -> (u64, u64) {
-        use std::ops::Bound;
+    fn clip_bounds<R: core::ops::RangeBounds<u64>>(&self, range: R) -> (u64, u64) {
+        use core::ops::Bound;
 
         let start = match range.start_bound() {
             Bound::Included(&n) => n.max(self.min),
@@ -228,7 +234,7 @@ impl<T> SortedIndexBuffer<T> {
     }
 
     #[inline]
-    fn resolve_range<R: std::ops::RangeBounds<u64>>(&self, range: R) -> (usize, usize, u64) {
+    fn resolve_range<R: core::ops::RangeBounds<u64>>(&self, range: R) -> (usize, usize, u64) {
         let (start, end) = self.clip_bounds(range);
         if start >= end {
             return (0, 0, start);

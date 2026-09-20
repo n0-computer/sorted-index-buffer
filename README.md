@@ -3,7 +3,8 @@
 This crate provides a data structure with identical behaviour to a `BTreeMap<u64, T>`,
 but optimized for the case where keys are mostly consecutive.
 
-It has no dependencies and should work in all environments.
+It has no dependencies. It is `no_std` and needs only the `alloc` crate, so it
+works in all environments that have a global allocator.
 
 Tests are comparing against `BTreeMap<u64, T>` using [proptest].
 
