@@ -1,40 +1,39 @@
+use std::collections::VecDeque;
+
 #[cfg(test)]
 mod tests;
+
+/// The number of consecutive indices a chunk covers.
+const CHUNK_SIZE: usize = 64;
+
+const _: () = assert!(CHUNK_SIZE <= u64::BITS as usize);
 
 /// A buffer indexed by a u64 sequence number.
 ///
 /// This behaves idential to a BTreeMap<u64, T>, but is optimized for the case where
 /// the indices are mostly contiguous, with occasional gaps.
 ///
-/// It will have large memory overhead if the indices are very sparse, so it
-/// should not be used as a general-purpose sorted map.
+/// Very sparse indices cost up to 64 slots per entry, so it should not be used as a
+/// general-purpose sorted map.
 ///
 /// # Internals
 ///
-/// The underlying storage is a contiguous buffer of `Option<T>` of twice the size
-/// of the key range, rounded up to the next power of two. We track min and max.
+/// Entries are stored in chunks of 64 slots, each covering an aligned range of indices.
+/// The chunks are kept in a `VecDeque` in ascending order, and a chunk is freed once it
+/// holds no entries. Storage is therefore at most one slot per entry plus two chunks per
+/// run of consecutive indices, whatever the gaps between the runs.
 ///
-/// The buffer is a `Vec<Option<T>>`, which can have some additional unused capacity.
+/// ```text
+/// |_x_xxxx_|        |___xx___|   chunks covering 0..8 and 16..24, if a chunk had 8 slots
+/// ```
 ///
-/// |_x_xxxx_|________| max-min=6, page size 8, buffer fits in first page
-///   ^ min
-///         ^ max
-/// |______x_|xxxx____| max-min=6, page size 8, buffer spans two pages
-///        ^ min
-///               ^ max
-///
-/// Access is O(1). Insertion and removal is usually O(1), but will occasionally
-/// move contents around to resize the buffer, which is O(n). Moving will only
-/// happen every O(n.next_power_of_two()) operations, so amortized complexity is
-/// still O(1).
+/// Access, insertion and removal find their chunk in O(1) when no chunk is missing
+/// between it and the first or the last chunk, and in O(log n) otherwise. Adding or
+/// freeing a chunk in the middle moves up to half of the chunk list.
 #[derive(Debug, Clone)]
 pub struct SortedIndexBuffer<T> {
-    /// The underlying data buffer. Size is a power of two, 2 "pages".
-    data: Vec<Option<T>>,
-    /// The minimum valid index (inclusive).
-    min: u64,
-    /// The maximum valid index (exclusive, so we can model the empty buffer).
-    max: u64,
+    /// Chunks holding at least one entry, in ascending order.
+    chunks: VecDeque<Chunk<T>>,
 }
 
 impl<T> Default for SortedIndexBuffer<T> {
@@ -44,13 +43,10 @@ impl<T> Default for SortedIndexBuffer<T> {
 }
 
 impl<T> SortedIndexBuffer<T> {
-    /// Create a new SortedIndexBuffer with the given initial capacity.
+    /// Create a new SortedIndexBuffer with chunk-list room for about `capacity` entries.
     pub fn with_capacity(capacity: usize) -> Self {
-        let data = Vec::with_capacity(capacity);
         Self {
-            data,
-            min: 0,
-            max: 0,
+            chunks: VecDeque::with_capacity(capacity.div_ceil(CHUNK_SIZE)),
         }
     }
 
@@ -61,7 +57,12 @@ impl<T> SortedIndexBuffer<T> {
 
     /// Returns true if the buffer contains no elements.
     pub fn is_empty(&self) -> bool {
-        self.data.is_empty()
+        self.chunks.is_empty()
+    }
+
+    /// Returns the number of slots in allocated chunks.
+    pub fn capacity(&self) -> usize {
+        self.chunks.len() * CHUNK_SIZE
     }
 
     /// Returns true if the buffer contains an element at the given index.
@@ -74,11 +75,7 @@ impl<T> SortedIndexBuffer<T> {
         &self,
         range: R,
     ) -> impl DoubleEndedIterator<Item = u64> + '_ {
-        let (buf_start, buf_end, start) = self.resolve_range(range);
-        self.data[buf_start..buf_end]
-            .iter()
-            .enumerate()
-            .filter_map(move |(i, slot)| slot.as_ref().map(|_| start + i as u64))
+        self.iter_range(range).map(|(index, _)| index)
     }
 
     /// Iterate over all values in the given index range in ascending order of their keys.
@@ -86,10 +83,7 @@ impl<T> SortedIndexBuffer<T> {
         &self,
         range: R,
     ) -> impl DoubleEndedIterator<Item = &T> + '_ {
-        let (buf_start, buf_end, _) = self.resolve_range(range);
-        self.data[buf_start..buf_end]
-            .iter()
-            .filter_map(|slot| slot.as_ref())
+        self.iter_range(range).map(|(_, value)| value)
     }
 
     /// Iterate over all values in the given index range in ascending order of their keys.
@@ -97,10 +91,22 @@ impl<T> SortedIndexBuffer<T> {
         &mut self,
         range: R,
     ) -> impl DoubleEndedIterator<Item = &mut T> + '_ {
-        let (buf_start, buf_end, _) = self.resolve_range(range);
-        self.data[buf_start..buf_end]
-            .iter_mut()
-            .filter_map(|slot| slot.as_mut())
+        let (start, end) = bounds(range);
+        let chunks = self.chunk_range(start, end);
+        self.chunks.range_mut(chunks).flat_map(move |chunk| {
+            let (base, occupied) = (chunk.base, chunk.occupied);
+            chunk
+                .slots
+                .iter_mut()
+                .enumerate()
+                .filter_map(move |(slot, value)| {
+                    let index = base + slot as u64;
+                    if !is_occupied(occupied, slot) || index < start || index > end {
+                        return None;
+                    }
+                    value.as_mut()
+                })
+        })
     }
 
     /// Iterate over all (index, value) pairs in the given index range in ascending order of their keys.
@@ -108,66 +114,53 @@ impl<T> SortedIndexBuffer<T> {
         &self,
         range: R,
     ) -> impl DoubleEndedIterator<Item = (u64, &T)> + '_ {
-        let (buf_start, buf_end, start) = self.resolve_range(range);
-        self.data[buf_start..buf_end]
-            .iter()
-            .enumerate()
-            .filter_map(move |(i, slot)| slot.as_ref().map(|v| (start + i as u64, v)))
+        let (start, end) = bounds(range);
+        let chunks = self.chunk_range(start, end);
+        self.chunks.range(chunks).flat_map(move |chunk| {
+            let (base, occupied) = (chunk.base, chunk.occupied);
+            chunk
+                .slots
+                .iter()
+                .enumerate()
+                .filter_map(move |(slot, value)| {
+                    let index = base + slot as u64;
+                    if !is_occupied(occupied, slot) || index < start || index > end {
+                        return None;
+                    }
+                    Some((index, value.as_ref()?))
+                })
+        })
     }
 
     pub fn retain(&mut self, f: impl FnMut(u64, &mut T) -> bool) {
-        if self.is_empty() {
-            return;
-        }
         let mut f = f;
-        let base = base(self.min, self.max);
-        for i in self.min..self.max {
-            let offset = (i - base) as usize;
-            let Some(v) = &mut self.data[offset] else {
-                continue;
-            };
-            if !f(i, v) {
-                self.data[offset] = None;
-            }
+        // A panic in `f` must leave the chunks in order, so empty chunks go in a second pass.
+        for chunk in &mut self.chunks {
+            chunk.retain(&mut f);
         }
-        // Now adjust min and max
-        let start = (self.min - base) as usize;
-        let end = (self.max - base) as usize;
-        let min1 = self.data[start..end]
-            .iter()
-            .position(|slot| slot.is_some())
-            .map(|p| p + start)
-            .unwrap_or(end) as u64
-            + base;
-        let max1 = self.data[start..end]
-            .iter()
-            .rev()
-            .position(|slot| slot.is_some())
-            .map(|p| end - p)
-            .unwrap_or(start + 1) as u64
-            + base;
-        self.resize(min1, max1);
+        self.chunks.retain(|chunk| !chunk.is_empty());
         self.check_invariants();
     }
 
     /// Retain only the elements in the given index range.
     pub fn retain_range<R: std::ops::RangeBounds<u64>>(&mut self, range: R) {
-        let (min1, max1) = self.clip_bounds(range);
-        if min1 >= max1 {
-            self.data.clear();
-            self.min = 0;
-            self.max = 0;
-            self.check_invariants();
-            return;
+        let (start, end) = bounds(range);
+        let keep = self.chunk_range(start, end);
+        self.chunks.truncate(keep.end);
+        self.chunks.drain(..keep.start);
+        // Only the first and the last chunk can hold indices outside the range.
+        if let Some(chunk) = self.chunks.front_mut() {
+            chunk.retain(|index, _| index >= start);
         }
-        let base = base(self.min, self.max);
-        for i in self.min..min1 {
-            self.data[(i - base) as usize] = None;
+        if let Some(chunk) = self.chunks.back_mut() {
+            chunk.retain(|index, _| index <= end);
         }
-        for i in max1..self.max {
-            self.data[(i - base) as usize] = None;
+        if self.chunks.front().is_some_and(Chunk::is_empty) {
+            self.chunks.pop_front();
         }
-        self.resize(min1, max1);
+        if self.chunks.back().is_some_and(Chunk::is_empty) {
+            self.chunks.pop_back();
+        }
         self.check_invariants();
     }
 
@@ -199,194 +192,94 @@ impl<T> SortedIndexBuffer<T> {
     /// DoubleEndedIterator without having to name the iterator type.
     #[allow(clippy::should_implement_trait)]
     pub fn into_iter(self) -> impl DoubleEndedIterator<Item = (u64, T)> {
-        let base = base(self.min, self.max);
-        self.data
-            .into_iter()
-            .enumerate()
-            .filter_map(move |(i, slot)| slot.map(|v| (base + i as u64, v)))
+        self.chunks.into_iter().flat_map(|chunk| {
+            let base = chunk.base;
+            let slots: Box<[Option<T>]> = chunk.slots;
+            Vec::from(slots)
+                .into_iter()
+                .enumerate()
+                .filter_map(move |(slot, value)| Some((base + slot as u64, value?)))
+        })
     }
 
-    /// Convert range bounds into an inclusive start and exclusive end, clipped to the current
-    /// bounds.
-    ///
-    /// The resulting range may be empty, which has to be handled by the caller.
-    #[inline]
-    fn clip_bounds<R: std::ops::RangeBounds<u64>>(&self, range: R) -> (u64, u64) {
-        use std::ops::Bound;
-
-        let start = match range.start_bound() {
-            Bound::Included(&n) => n.max(self.min),
-            Bound::Excluded(&n) => (n + 1).max(self.min),
-            Bound::Unbounded => self.min,
-        };
-        let end = match range.end_bound() {
-            Bound::Included(&n) => (n + 1).min(self.max),
-            Bound::Excluded(&n) => n.min(self.max),
-            Bound::Unbounded => self.max,
-        };
-        (start, end)
-    }
-
-    #[inline]
-    fn resolve_range<R: std::ops::RangeBounds<u64>>(&self, range: R) -> (usize, usize, u64) {
-        let (start, end) = self.clip_bounds(range);
-        if start >= end {
-            return (0, 0, start);
+    /// Returns the positions of the chunks overlapping `start..=end`.
+    fn chunk_range(&self, start: u64, end: u64) -> std::ops::Range<usize> {
+        if start > end {
+            return 0..0;
         }
-        let base = base(self.min, self.max);
-        let buf_start = (start - base) as usize;
-        let buf_end = (end - base) as usize;
-        (buf_start, buf_end, start)
+        let first = match self.position(chunk_base(start)) {
+            Ok(pos) | Err(pos) => pos,
+        };
+        let last = match self.position(chunk_base(end)) {
+            Ok(pos) => pos + 1,
+            Err(pos) => pos,
+        };
+        first..last
+    }
+
+    /// Returns the position of the chunk at `base`, or the position to insert it at.
+    fn position(&self, base: u64) -> Result<usize, usize> {
+        let (Some(first), Some(last)) = (self.chunks.front(), self.chunks.back()) else {
+            return Err(0);
+        };
+        let last_pos = self.chunks.len() - 1;
+        if base > last.base {
+            return Err(last_pos + 1);
+        }
+        if base == last.base {
+            return Ok(last_pos);
+        }
+        if base < first.base {
+            return Err(0);
+        }
+        // Bases strictly increase, so counting chunks from either end finds the chunk
+        // when no chunk is missing in between. Every guess is checked.
+        let from_first = ((base - first.base) / CHUNK_SIZE as u64) as usize;
+        let from_last = ((last.base - base) / CHUNK_SIZE as u64) as usize;
+        for pos in [from_first, last_pos.saturating_sub(from_last)] {
+            if self.chunks.get(pos).is_some_and(|chunk| chunk.base == base) {
+                return Ok(pos);
+            }
+        }
+        self.chunks.binary_search_by_key(&base, |chunk| chunk.base)
     }
 
     /// Get a reference to the value at the given index, if it exists.
     pub fn get(&self, index: u64) -> Option<&T> {
-        if index < self.min || index >= self.max {
-            return None;
-        }
-        let base = base(self.min, self.max);
-        let offset = (index - base) as usize;
-        self.data[offset].as_ref()
+        let pos = self.position(chunk_base(index)).ok()?;
+        self.chunks.get(pos)?.slots[slot(index)].as_ref()
     }
 
     /// Insert value at index.
     pub fn insert(&mut self, index: u64, value: T) {
-        if self.is_empty() {
-            self.min = index;
-            self.max = index + 1;
-            self.data.push(Some(value));
-        } else {
-            let (min1, max1) = (self.min.min(index), self.max.max(index + 1));
-            self.resize(min1, max1);
-            self.insert0(index, value);
+        let base = chunk_base(index);
+        let pos = match self.position(base) {
+            Ok(pos) => pos,
+            Err(pos) => {
+                self.chunks.insert(pos, Chunk::new(base));
+                pos
+            }
+        };
+        if let Some(chunk) = self.chunks.get_mut(pos) {
+            let slot = slot(index);
+            chunk.slots[slot] = Some(value);
+            chunk.occupied |= 1 << slot;
         }
         self.check_invariants();
     }
 
     /// Remove value at index.
     pub fn remove(&mut self, index: u64) -> Option<T> {
-        if self.is_empty() {
-            return None;
-        }
-        let res = self.remove0(index);
-        if index == self.min {
-            let base = base(self.min, self.max);
-            let start = (self.min - base) as usize;
-            let end = (self.max - base) as usize;
-            // no need to check start, since we just removed that element
-            let skip = self.data[start + 1..end]
-                .iter()
-                .position(|slot| slot.is_some())
-                .map(|p| p + 1)
-                .unwrap_or(end - start);
-            self.resize(self.min + skip as u64, self.max);
-        } else if index + 1 == self.max {
-            let base = base(self.min, self.max);
-            let start = (self.min - base) as usize;
-            let end = (self.max - base) as usize;
-            // no need to check end-1, since we just removed that element
-            let skip = self.data[start..end - 1]
-                .iter()
-                .rev()
-                .position(|slot| slot.is_some())
-                .map(|p| p + 1)
-                .unwrap_or(end - start);
-            self.resize(self.min, self.max - skip as u64);
+        let pos = self.position(chunk_base(index)).ok()?;
+        let chunk = self.chunks.get_mut(pos)?;
+        let slot = slot(index);
+        chunk.occupied &= !(1 << slot);
+        let value = chunk.slots[slot].take();
+        if chunk.is_empty() {
+            self.chunks.remove(pos);
         }
         self.check_invariants();
-        res
-    }
-
-    /// Insert value at index, assuming the buffer already covers that index.
-    ///
-    /// The resulting buffer may violate the invariants.
-    #[inline(always)]
-    fn insert0(&mut self, index: u64, value: T) {
-        let base = base(self.min, self.max);
-        let offset = (index - base) as usize;
-        self.buf_mut()[offset] = Some(value);
-    }
-
-    /// Remove value at index without resizing the buffer.
-    ///
-    /// The resulting buffer may violate the invariants.
-    #[inline(always)]
-    fn remove0(&mut self, index: u64) -> Option<T> {
-        if index < self.min || index >= self.max {
-            return None;
-        }
-        let base = base(self.min, self.max);
-        let offset = (index - base) as usize;
-        self.buf_mut()[offset].take()
-    }
-
-    /// Resize the buffer to cover the range [`min1`, `max1`), while preserving existing
-    /// elements.
-    #[inline(always)]
-    fn resize(&mut self, min1: u64, max1: u64) {
-        if min1 == self.min && max1 == self.max {
-            // nothing to do
-            return;
-        }
-        if min1 >= max1 {
-            // resizing to empty buffer
-            self.data.clear();
-            self.min = 0;
-            self.max = 0;
-            return;
-        }
-        let len0 = self.buf().len();
-        let len1 = buf_len(min1, max1);
-        let base0 = base(self.min, self.max);
-        let base1 = base(min1, max1);
-        if len0 == len1 {
-            // just need to move data around within the existing buffer
-            //
-            // we use rotate even though half the buffer is empty, because
-            // otherwise we would require Copy on T.
-            if base1 < base0 {
-                let shift = (base0 - base1) as usize;
-                self.buf_mut().rotate_right(shift);
-            } else if base1 > base0 {
-                let shift = (base1 - base0) as usize;
-                self.buf_mut().rotate_left(shift);
-            }
-        } else if len0 < len1 {
-            for _ in len0..len1 {
-                self.data.push(None);
-            }
-            // Grow
-            if len0 != 0 {
-                let start0 = (self.min - base0) as usize;
-                let start1 = (self.min - base1) as usize;
-                let count = (self.max - self.min) as usize;
-                for i in 0..count {
-                    self.data.swap(start0 + i, start1 + i);
-                }
-            }
-        } else {
-            // Shrink
-            let start0 = (min1 - base0) as usize;
-            let start1 = (min1 - base1) as usize;
-            let count = (max1 - min1) as usize;
-
-            for i in 0..count {
-                self.data.swap(start0 + i, start1 + i);
-            }
-            self.data.truncate(len1);
-        }
-        self.min = min1;
-        self.max = max1;
-    }
-
-    #[inline(always)]
-    fn buf(&self) -> &[Option<T>] {
-        &self.data
-    }
-
-    #[inline(always)]
-    fn buf_mut(&mut self) -> &mut [Option<T>] {
-        &mut self.data
+        value
     }
 
     /// Check that the invariants of the SortedIndexBuffer hold.
@@ -395,47 +288,100 @@ impl<T> SortedIndexBuffer<T> {
     ///
     /// It is a noop in release builds.
     fn check_invariants(&self) {
-        if self.is_empty() {
-            // for the empty buffer, min and max must be zero
-            debug_assert_eq!(self.min, 0);
-            debug_assert_eq!(self.max, 0);
-        } else {
-            // for a non-empty buffer, elements min and max-1 must be valid
-            debug_assert!(self.min < self.max);
-            debug_assert!(self.get(self.min).is_some() && self.get(self.max - 1).is_some());
-        }
+        // Only the ends are checked, so debug builds stay O(1) per operation.
+        debug_assert!(!self.chunks.front().is_some_and(Chunk::is_empty));
+        debug_assert!(!self.chunks.back().is_some_and(Chunk::is_empty));
     }
 
-    /// Same as `check_invariants`, but also checks that the unused parts of the buffer are empty.
+    /// Same as `check_invariants`, but checks every chunk.
     ///
     /// This is more expensive, so only used in tests.
     #[cfg(test)]
     fn check_invariants_expensive(&self) {
         self.check_invariants();
-        let base = base(self.min, self.max);
-        let start = (self.min - base) as usize;
-        let end = (self.max - base) as usize;
-        for i in 0..start {
-            debug_assert!(self.data[i].is_none());
+        for chunk in &self.chunks {
+            debug_assert!(!chunk.is_empty());
+            debug_assert_eq!(chunk.base, chunk_base(chunk.base));
+            for (slot, value) in chunk.slots.iter().enumerate() {
+                debug_assert_eq!(is_occupied(chunk.occupied, slot), value.is_some());
+            }
         }
-        for i in end..self.data.len() {
-            debug_assert!(self.data[i].is_none());
+        for (a, b) in self.chunks.iter().zip(self.chunks.iter().skip(1)) {
+            debug_assert!(a.base < b.base);
         }
     }
 }
 
-/// Compute the minimum buffer length needed to cover [min, max) even in the
-/// case where min..max go over a page boundary.
-#[inline(always)]
-fn buf_len(min: u64, max: u64) -> usize {
-    let page_size = (max - min).next_power_of_two() as usize;
-    page_size * 2
+/// A single aligned range of `CHUNK_SIZE` slots.
+#[derive(Debug, Clone)]
+struct Chunk<T> {
+    /// The index of the first slot.
+    base: u64,
+    /// Bit `i` is set if slot `i` holds a value.
+    occupied: u64,
+    slots: Box<[Option<T>; CHUNK_SIZE]>,
 }
 
-/// Compute the base index for the buffer covering [min, max).
+impl<T> Chunk<T> {
+    fn new(base: u64) -> Self {
+        Self {
+            base,
+            occupied: 0,
+            slots: Box::new([const { None }; CHUNK_SIZE]),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.occupied == 0
+    }
+
+    /// Removes the values for which `f` returns false.
+    fn retain(&mut self, mut f: impl FnMut(u64, &mut T) -> bool) {
+        for (slot, value) in self.slots.iter_mut().enumerate() {
+            let Some(v) = value else {
+                continue;
+            };
+            if !f(self.base + slot as u64, v) {
+                *value = None;
+                self.occupied &= !(1 << slot);
+            }
+        }
+    }
+}
+
+/// Returns the inclusive bounds of `range`, with `start > end` if it is empty.
+fn bounds<R: std::ops::RangeBounds<u64>>(range: R) -> (u64, u64) {
+    use std::ops::Bound;
+
+    let start = match range.start_bound() {
+        Bound::Included(&n) => Some(n),
+        Bound::Excluded(&n) => n.checked_add(1),
+        Bound::Unbounded => Some(0),
+    };
+    let end = match range.end_bound() {
+        Bound::Included(&n) => Some(n),
+        Bound::Excluded(&n) => n.checked_sub(1),
+        Bound::Unbounded => Some(u64::MAX),
+    };
+    match (start, end) {
+        (Some(start), Some(end)) => (start, end),
+        _ => (u64::MAX, 0),
+    }
+}
+
+/// Returns the index of the first slot of the chunk covering `index`.
 #[inline(always)]
-fn base(min: u64, max: u64) -> u64 {
-    let buf_len = buf_len(min, max);
-    let mask = (buf_len as u64) / 2 - 1;
-    min & !mask
+fn chunk_base(index: u64) -> u64 {
+    index - index % CHUNK_SIZE as u64
+}
+
+/// Returns the slot of `index` within its chunk.
+#[inline(always)]
+fn slot(index: u64) -> usize {
+    (index % CHUNK_SIZE as u64) as usize
+}
+
+#[inline(always)]
+fn is_occupied(occupied: u64, slot: usize) -> bool {
+    (occupied >> slot) & 1 == 1
 }
