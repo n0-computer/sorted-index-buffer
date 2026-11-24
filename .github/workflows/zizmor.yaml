@@ -16,7 +16,7 @@ permissions:
 jobs:
   zizmor:
     timeout-minutes: 10
-    runs-on: [self-hosted, linux, X64]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -31,7 +31,7 @@ jobs:
     # Fails if a pinned SHA drifts from its version comment, or is younger
     # than the cooldown in .pinact.yaml.
     timeout-minutes: 10
-    runs-on: [self-hosted, linux, X64]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
