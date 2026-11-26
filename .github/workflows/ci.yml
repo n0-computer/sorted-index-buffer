@@ -55,7 +55,7 @@ jobs:
         if: runner.os != 'Windows'
         with:
           toolchain: stable
-      # dtolnay/rust-toolchain needs bash, which is broken on the self-hosted Windows runners.
+      # bash is broken on the self-hosted Windows runners.
       - name: Install Rust (Windows)
         if: runner.os == 'Windows'
         run: |
