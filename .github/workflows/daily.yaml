@@ -1,0 +1,22 @@
+name: Daily CI
+
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: daily-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Runs even without dependency changes, to catch new advisories.
+  cargo-deny:
+    uses: n0-computer/workflows/.github/workflows/cargo-deny.yaml@v2
+    with:
+      force: true
+    secrets:
+      DISCORD_N0_GITHUB_CHANNEL_WEBHOOK_URL: ${{ secrets.DISCORD_N0_GITHUB_CHANNEL_WEBHOOK_URL }}

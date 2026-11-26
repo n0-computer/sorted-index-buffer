@@ -1,0 +1,14 @@
+[bans]
+multiple-versions = "allow"
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "MIT",
+]
+
+[advisories]
+yanked = "deny"
+
+[sources]
+allow-git = []
